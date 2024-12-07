@@ -29,12 +29,18 @@ Mode :: enum {
 	Edge,
 }
 
+Vertex :: struct {
+	position: [2]f32,
+	velocity: [2]f32,
+	acceleration: [2]f32,
+}
+
 Game_Memory :: struct {
 	camera_target: rl.Vector2,
 	camera_zoom: f32,
 	font: rl.Font,
 	mode: Mode,
-	vertices: [dynamic][2]f32,
+	vertices: [dynamic]Vertex,
 	edges: [dynamic][2]int,
 	dragging: bool,
 	drag_start: [2]f32,
@@ -42,6 +48,7 @@ Game_Memory :: struct {
 	drag_left: bool,
 	selected_vertices: [dynamic]int,
 	selected_edges: [dynamic]int,
+	apply_force: bool,
 }
 
 g_mem: ^Game_Memory
@@ -68,14 +75,14 @@ game_update :: proc() -> bool {
 	mouse_x_within_canvas := SIDEBAR_WIDTH < mouse_position.x && mouse_position.x < w - SIDEBAR_WIDTH
 	vertex_under_mouse := -1
 	for vertex in g_mem.selected_vertices { // TODO: Do we care about order here?
-		if linalg.distance(g_mem.vertices[vertex], mouse_world_position) < 10 {
+		if linalg.distance(g_mem.vertices[vertex].position, mouse_world_position) < 10 {
 			vertex_under_mouse = vertex
 			break
 		}
 	}
 	if vertex_under_mouse == -1 {
 		for i := len(g_mem.vertices) - 1; i > -1; i -= 1 {
-			if linalg.distance(g_mem.vertices[i], mouse_world_position) < 10 {
+			if linalg.distance(g_mem.vertices[i].position, mouse_world_position) < 10 {
 				vertex_under_mouse = i
 				break
 			}
@@ -117,6 +124,7 @@ game_update :: proc() -> bool {
 						clear(&g_mem.selected_vertices)
 						clear(&g_mem.selected_edges)
 						append(&g_mem.selected_vertices, vertex_under_mouse)
+						g_mem.vertices[vertex_under_mouse].velocity = {0.0, 0.0}
 					}
 				}
 			}
@@ -125,7 +133,7 @@ game_update :: proc() -> bool {
 					g_mem.camera_target -= rl.GetMouseDelta() / g_mem.camera_zoom // TODO: This will change mouse_world_position. Is this an issue?
 				} else {
 					for vertex in g_mem.selected_vertices {
-						g_mem.vertices[vertex] += rl.GetMouseDelta() / g_mem.camera_zoom
+						g_mem.vertices[vertex].position += rl.GetMouseDelta() / g_mem.camera_zoom
 					}
 				}
 			}
@@ -141,8 +149,9 @@ game_update :: proc() -> bool {
 				if (vertex_under_mouse == -1) {
 					clear(&g_mem.selected_vertices)
 					clear(&g_mem.selected_edges)
-					append(&g_mem.vertices, mouse_world_position)
+					append(&g_mem.vertices, Vertex{ position = mouse_world_position })
 					append(&g_mem.selected_vertices, len(g_mem.vertices) - 1)
+					g_mem.vertices[len(g_mem.vertices) - 1].velocity = {0.0, 0.0}
 					g_mem.drag_vertex_index = len(g_mem.vertices) - 1
 					vertex_under_mouse = len(g_mem.vertices) - 1
 				} else {
@@ -157,13 +166,14 @@ game_update :: proc() -> bool {
 						clear(&g_mem.selected_vertices)
 						clear(&g_mem.selected_edges)
 						append(&g_mem.selected_vertices, vertex_under_mouse)
+						g_mem.vertices[vertex_under_mouse].velocity = {0.0, 0.0}
 					}
 					g_mem.drag_vertex_index = vertex_under_mouse
 				}
 			} else if g_mem.dragging && g_mem.drag_left {
 				assert(g_mem.drag_vertex_index > -1)
 				for vertex in g_mem.selected_vertices {
-					g_mem.vertices[vertex] += rl.GetMouseDelta() / g_mem.camera_zoom
+					g_mem.vertices[vertex].position += rl.GetMouseDelta() / g_mem.camera_zoom
 				}
 			}
 			if rl.IsMouseButtonReleased(.LEFT) && g_mem.dragging && g_mem.drag_left {
@@ -184,13 +194,13 @@ game_update :: proc() -> bool {
 					edge_under_mouse := -1
 					for edge_index in g_mem.selected_edges { // TODO: Do we care about order here?
 						edge := g_mem.edges[edge_index]
-						edge_vector := g_mem.vertices[edge[1]] - g_mem.vertices[edge[0]]
-						mouse_vector := mouse_world_position - g_mem.vertices[edge[0]]
+						edge_vector := g_mem.vertices[edge[1]].position - g_mem.vertices[edge[0]].position
+						mouse_vector := mouse_world_position - g_mem.vertices[edge[0]].position
 						t : f32 = 0
 						if linalg.length2(edge_vector) > 1e-6 {
 							t = clamp(linalg.dot(edge_vector, mouse_vector) / linalg.length2(edge_vector), 0, 1)
 						}
-						closest_point := g_mem.vertices[edge[0]] + t * edge_vector
+						closest_point := g_mem.vertices[edge[0]].position + t * edge_vector
 						if linalg.distance(closest_point, mouse_world_position) < 10 {
 							edge_under_mouse = edge_index
 							break
@@ -198,13 +208,13 @@ game_update :: proc() -> bool {
 					}
 					if edge_under_mouse == -1 {
 						for edge, i in g_mem.edges { // TODO: Do we care about order here?
-							edge_vector := g_mem.vertices[edge[1]] - g_mem.vertices[edge[0]]
-							mouse_vector := mouse_world_position - g_mem.vertices[edge[0]]
+							edge_vector := g_mem.vertices[edge[1]].position - g_mem.vertices[edge[0]].position
+							mouse_vector := mouse_world_position - g_mem.vertices[edge[0]].position
 							t : f32 = 0
 							if linalg.length2(edge_vector) > 1e-6 {
 								t = clamp(linalg.dot(edge_vector, mouse_vector) / linalg.length2(edge_vector), 0, 1)
 							}
-							closest_point := g_mem.vertices[edge[0]] + t * edge_vector
+							closest_point := g_mem.vertices[edge[0]].position + t * edge_vector
 							if linalg.distance(closest_point, mouse_world_position) < 10 {
 								edge_under_mouse = i
 								break
@@ -262,31 +272,31 @@ game_update :: proc() -> bool {
 	if rl.IsMouseButtonReleased(.RIGHT) && g_mem.dragging && !g_mem.drag_left {
 		if g_mem.mode == .Edge {
 			for edge, i in g_mem.edges {
-				edge_vector := g_mem.vertices[edge[1]] - g_mem.vertices[edge[0]]
+				edge_vector := g_mem.vertices[edge[1]].position - g_mem.vertices[edge[0]].position
 				x_t : [2]f32 = { min(f32), max(f32) }
 				if abs(edge_vector.x) > 1e-6 {
-					t_0 := (min(g_mem.drag_start.x, mouse_world_position.x) - g_mem.vertices[edge[0]].x) / edge_vector.x
-					t_1 := (max(g_mem.drag_start.x, mouse_world_position.x) - g_mem.vertices[edge[0]].x) / edge_vector.x
+					t_0 := (min(g_mem.drag_start.x, mouse_world_position.x) - g_mem.vertices[edge[0]].position.x) / edge_vector.x
+					t_1 := (max(g_mem.drag_start.x, mouse_world_position.x) - g_mem.vertices[edge[0]].position.x) / edge_vector.x
 					if t_0 < t_1 {
 						x_t = { t_0, t_1 }
 					} else {
 						x_t = { t_1, t_0 }
 					}
-				} else if g_mem.vertices[edge[0]].x < min(g_mem.drag_start.x, mouse_world_position.x) || 
-					max(g_mem.drag_start.x, mouse_world_position.x) < g_mem.vertices[edge[0]].x {
+				} else if g_mem.vertices[edge[0]].position.x < min(g_mem.drag_start.x, mouse_world_position.x) || 
+					max(g_mem.drag_start.x, mouse_world_position.x) < g_mem.vertices[edge[0]].position.x {
 					continue
 				}
 				y_t : [2]f32 = { min(f32), max(f32) }
 				if abs(edge_vector.y) > 1e-6 {
-					t_0 := (min(g_mem.drag_start.y, mouse_world_position.y) - g_mem.vertices[edge[0]].y) / edge_vector.y
-					t_1 := (max(g_mem.drag_start.y, mouse_world_position.y) - g_mem.vertices[edge[0]].y) / edge_vector.y
+					t_0 := (min(g_mem.drag_start.y, mouse_world_position.y) - g_mem.vertices[edge[0]].position.y) / edge_vector.y
+					t_1 := (max(g_mem.drag_start.y, mouse_world_position.y) - g_mem.vertices[edge[0]].position.y) / edge_vector.y
 					if t_0 < t_1 {
 						y_t = { t_0, t_1 }
 					} else {
 						y_t = { t_1, t_0 }
 					}
-				} else if g_mem.vertices[edge[0]].y < min(g_mem.drag_start.y, mouse_world_position.y) || 
-					max(g_mem.drag_start.y, mouse_world_position.y) < g_mem.vertices[edge[0]].y {
+				} else if g_mem.vertices[edge[0]].position.y < min(g_mem.drag_start.y, mouse_world_position.y) || 
+					max(g_mem.drag_start.y, mouse_world_position.y) < g_mem.vertices[edge[0]].position.y {
 					continue
 				}
 				t_min := min(f32)
@@ -310,13 +320,15 @@ game_update :: proc() -> bool {
 			}
 		} else {
 			for vertex, i in g_mem.vertices {
-				if min(g_mem.drag_start.x, mouse_world_position.x) <= vertex.x &&
-				vertex.x <= max(g_mem.drag_start.x, mouse_world_position.x) &&
-				min(g_mem.drag_start.y, mouse_world_position.y) <= vertex.y &&
-				vertex.y <= max(g_mem.drag_start.y, mouse_world_position.y) {
+				if min(g_mem.drag_start.x, mouse_world_position.x) <= vertex.position.x &&
+				vertex.position.x <= max(g_mem.drag_start.x, mouse_world_position.x) &&
+				min(g_mem.drag_start.y, mouse_world_position.y) <= vertex.position.y &&
+				vertex.position.y <= max(g_mem.drag_start.y, mouse_world_position.y) {
 					append(&g_mem.selected_vertices, i)
+					g_mem.vertices[i].velocity = {0.0, 0.0}
 				}
 			}
+			slice.sort(g_mem.selected_vertices[:])
 		}
 		g_mem.dragging = false
 	}
@@ -329,7 +341,6 @@ game_update :: proc() -> bool {
 			unordered_remove(&g_mem.edges, edge)
 		}
 
-		slice.sort(g_mem.selected_vertices[:])
 		i := 0
 		for i < len(g_mem.edges) {
 			edge := g_mem.edges[i]
@@ -360,7 +371,47 @@ game_update :: proc() -> bool {
 
 		vertex_under_mouse = -1
 		for i := len(g_mem.vertices) - 1; i > -1; i -= 1 {
-			if linalg.distance(g_mem.vertices[i], mouse_world_position) < 10 {
+			if linalg.distance(g_mem.vertices[i].position, mouse_world_position) < 10 {
+				vertex_under_mouse = i
+				break
+			}
+		}
+	}
+
+	if g_mem.apply_force {
+		dt := min(rl.GetFrameTime(), 1 / 30.0) * 20.0
+		for _ in 0..<10 {
+			for i in 0..<len(g_mem.vertices) {
+				g_mem.vertices[i].acceleration = -0.05 * g_mem.vertices[i].velocity
+			}
+			for i in 0..<len(g_mem.vertices) {
+				for j in i+1..<len(g_mem.vertices) {
+					displacement := g_mem.vertices[j].position - g_mem.vertices[i].position
+					force := 100.0 * linalg.normalize0(displacement) / linalg.length(displacement)
+					g_mem.vertices[j].acceleration += force * dt / 10.0
+					g_mem.vertices[i].acceleration -= force * dt / 10.0
+				}
+			}
+			for edge in g_mem.edges {
+				i := edge[0]
+				j := edge[1]
+				displacement := g_mem.vertices[j].position - g_mem.vertices[i].position
+				force := (50 - linalg.length(displacement)) * linalg.normalize0(displacement)
+				g_mem.vertices[j].acceleration += force * dt / 10.0
+				g_mem.vertices[i].acceleration -= force * dt / 10.0
+			}
+			for i in 0..<len(g_mem.vertices) {
+				_, found := slice.binary_search(g_mem.selected_vertices[:], i)
+				if !found {
+					g_mem.vertices[i].velocity += g_mem.vertices[i].acceleration * dt / 10.0
+					g_mem.vertices[i].position += g_mem.vertices[i].velocity * dt / 10.0
+				}
+			}
+		}
+
+		vertex_under_mouse = -1
+		for i := len(g_mem.vertices) - 1; i > -1; i -= 1 {
+			if linalg.distance(g_mem.vertices[i].position, mouse_world_position) < 10 {
 				vertex_under_mouse = i
 				break
 			}
@@ -374,56 +425,56 @@ game_update :: proc() -> bool {
 	rl.BeginMode2D(game_camera())
 
 	for edge in g_mem.edges {
-		rl.DrawLineV(g_mem.vertices[edge[0]], g_mem.vertices[edge[1]], rl.WHITE)
+		rl.DrawLineV(g_mem.vertices[edge[0]].position, g_mem.vertices[edge[1]].position, rl.WHITE)
 	}
 	// Edge to be created
 	if g_mem.dragging && g_mem.mode == .Edge && g_mem.drag_left {
 		assert(g_mem.drag_vertex_index > -1)
-		rl.DrawLineV(g_mem.vertices[g_mem.drag_vertex_index], mouse_world_position, rl.WHITE)
+		rl.DrawLineV(g_mem.vertices[g_mem.drag_vertex_index].position, mouse_world_position, rl.WHITE)
 	}
 	for edge in g_mem.selected_edges {
 		edge := g_mem.edges[edge]
-		rl.DrawLineV(g_mem.vertices[edge[0]], g_mem.vertices[edge[1]], rl.ORANGE)
+		rl.DrawLineV(g_mem.vertices[edge[0]].position, g_mem.vertices[edge[1]].position, rl.ORANGE)
 	}
 
 	for vertex in g_mem.vertices {
-		rl.DrawPoly(vertex, 6, 10, 0, rl.WHITE)
+		rl.DrawPoly(vertex.position, 6, 10, 0, rl.WHITE)
 	}
 	if vertex_under_mouse > -1 {
-		rl.DrawPoly(g_mem.vertices[vertex_under_mouse], 6, 10, 0, rl.YELLOW)
+		rl.DrawPoly(g_mem.vertices[vertex_under_mouse].position, 6, 10, 0, rl.YELLOW)
 	}
 	for vertex in g_mem.selected_vertices {
-		rl.DrawPoly(g_mem.vertices[vertex], 6, 10, 0, rl.ORANGE)
+		rl.DrawPoly(g_mem.vertices[vertex].position, 6, 10, 0, rl.ORANGE)
 	}
 
 	if g_mem.dragging && !g_mem.drag_left {
 		if g_mem.mode == .Edge {
 			for edge, i in g_mem.edges {
-				edge_vector := g_mem.vertices[edge[1]] - g_mem.vertices[edge[0]]
+				edge_vector := g_mem.vertices[edge[1]].position - g_mem.vertices[edge[0]].position
 				x_t : [2]f32 = { min(f32), max(f32) }
 				if abs(edge_vector.x) > 1e-6 {
-					t_0 := (min(g_mem.drag_start.x, mouse_world_position.x) - g_mem.vertices[edge[0]].x) / edge_vector.x
-					t_1 := (max(g_mem.drag_start.x, mouse_world_position.x) - g_mem.vertices[edge[0]].x) / edge_vector.x
+					t_0 := (min(g_mem.drag_start.x, mouse_world_position.x) - g_mem.vertices[edge[0]].position.x) / edge_vector.x
+					t_1 := (max(g_mem.drag_start.x, mouse_world_position.x) - g_mem.vertices[edge[0]].position.x) / edge_vector.x
 					if t_0 < t_1 {
 						x_t = { t_0, t_1 }
 					} else {
 						x_t = { t_1, t_0 }
 					}
-				} else if g_mem.vertices[edge[0]].x < min(g_mem.drag_start.x, mouse_world_position.x) || 
-					max(g_mem.drag_start.x, mouse_world_position.x) < g_mem.vertices[edge[0]].x {
+				} else if g_mem.vertices[edge[0]].position.x < min(g_mem.drag_start.x, mouse_world_position.x) || 
+					max(g_mem.drag_start.x, mouse_world_position.x) < g_mem.vertices[edge[0]].position.x {
 					continue
 				}
 				y_t : [2]f32 = { min(f32), max(f32) }
 				if abs(edge_vector.y) > 1e-6 {
-					t_0 := (min(g_mem.drag_start.y, mouse_world_position.y) - g_mem.vertices[edge[0]].y) / edge_vector.y
-					t_1 := (max(g_mem.drag_start.y, mouse_world_position.y) - g_mem.vertices[edge[0]].y) / edge_vector.y
+					t_0 := (min(g_mem.drag_start.y, mouse_world_position.y) - g_mem.vertices[edge[0]].position.y) / edge_vector.y
+					t_1 := (max(g_mem.drag_start.y, mouse_world_position.y) - g_mem.vertices[edge[0]].position.y) / edge_vector.y
 					if t_0 < t_1 {
 						y_t = { t_0, t_1 }
 					} else {
 						y_t = { t_1, t_0 }
 					}
-				} else if g_mem.vertices[edge[0]].y < min(g_mem.drag_start.y, mouse_world_position.y) || 
-					max(g_mem.drag_start.y, mouse_world_position.y) < g_mem.vertices[edge[0]].y {
+				} else if g_mem.vertices[edge[0]].position.y < min(g_mem.drag_start.y, mouse_world_position.y) || 
+					max(g_mem.drag_start.y, mouse_world_position.y) < g_mem.vertices[edge[0]].position.y {
 					continue
 				}
 				t_min := min(f32)
@@ -442,16 +493,16 @@ game_update :: proc() -> bool {
 					t_max = y_t[1]
 				}
 				if !(0 > t_max || 1 < t_min) {
-					rl.DrawLineV(g_mem.vertices[edge[0]], g_mem.vertices[edge[1]], rl.ORANGE)
+					rl.DrawLineV(g_mem.vertices[edge[0]].position, g_mem.vertices[edge[1]].position, rl.ORANGE)
 				}
 			}
 		} else {
 			for vertex, i in g_mem.vertices {
-				if min(g_mem.drag_start.x, mouse_world_position.x) <= vertex.x &&
-				vertex.x <= max(g_mem.drag_start.x, mouse_world_position.x) &&
-				min(g_mem.drag_start.y, mouse_world_position.y) <= vertex.y &&
-				vertex.y <= max(g_mem.drag_start.y, mouse_world_position.y) {
-					rl.DrawPoly(g_mem.vertices[i], 6, 10, 0, rl.ORANGE)
+				if min(g_mem.drag_start.x, mouse_world_position.x) <= vertex.position.x &&
+				vertex.position.x <= max(g_mem.drag_start.x, mouse_world_position.x) &&
+				min(g_mem.drag_start.y, mouse_world_position.y) <= vertex.position.y &&
+				vertex.position.y <= max(g_mem.drag_start.y, mouse_world_position.y) {
+					rl.DrawPoly(g_mem.vertices[i].position, 6, 10, 0, rl.ORANGE)
 				}
 			}
 		}
@@ -464,7 +515,7 @@ game_update :: proc() -> bool {
 
 	if g_mem.dragging && g_mem.mode == .Edge && g_mem.drag_left {
 		assert(g_mem.drag_vertex_index > -1)
-		rl.DrawPoly(g_mem.vertices[g_mem.drag_vertex_index], 6, 10, 0, rl.ORANGE)
+		rl.DrawPoly(g_mem.vertices[g_mem.drag_vertex_index].position, 6, 10, 0, rl.ORANGE)
 	}
 	rl.EndMode2D()
 
@@ -486,7 +537,7 @@ game_update :: proc() -> bool {
 	if rl.IsMouseButtonPressed(.LEFT) {
 		// Check if a button was pressed.
 		mouse_position := rl.GetMousePosition()
-		if mouse_position.x <= 100 {
+		if mouse_position.x <= SIDEBAR_WIDTH {
 			y_index := int((mouse_position.y - text_y) / 35)
 			if 0 <= y_index && y_index < 3 {
 				g_mem.mode = Mode(y_index)
@@ -510,6 +561,27 @@ game_update :: proc() -> bool {
 		}
 		rl.DrawTextEx(g_mem.font, mode, {5, text_y}, 28, 0, color)
 		text_y += 35
+	}
+
+	text_y += 20
+
+	if rl.IsMouseButtonPressed(.LEFT) {
+		// Check if a button was pressed.
+		mouse_position := rl.GetMousePosition()
+		if mouse_position.x <= SIDEBAR_WIDTH && 0 <= mouse_position.y - text_y && mouse_position.y - text_y < 35 {
+			g_mem.apply_force = !g_mem.apply_force
+			if g_mem.apply_force {
+				for &vertex in g_mem.vertices {
+					vertex.velocity = {0.0, 0.0}
+				}
+			}
+		}
+	}
+
+	if g_mem.apply_force {
+		rl.DrawTextEx(g_mem.font, "Pause forces", {5, text_y}, 28, 0, rl.WHITE)
+	} else {
+		rl.DrawTextEx(g_mem.font, "Apply forces", {5, text_y}, 28, 0, rl.WHITE)
 	}
 
 	rl.EndDrawing()
