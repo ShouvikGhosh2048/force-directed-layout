@@ -18,6 +18,7 @@ import "core:math"
 import "core:math/rand"
 import "core:math/linalg"
 import "core:fmt"
+import "core:slice"
 import rl "vendor:raylib"
 
 PIXEL_WINDOW_HEIGHT :: 180
@@ -318,6 +319,52 @@ game_update :: proc() -> bool {
 			}
 		}
 		g_mem.dragging = false
+	}
+
+	if rl.IsKeyPressed(.DELETE) && !g_mem.dragging {
+		// We remove selected edges and vertices.
+		// We maintain the order of vertices.
+		// We don't maintain the order of edges.
+		for edge in g_mem.selected_edges {
+			unordered_remove(&g_mem.edges, edge)
+		}
+
+		slice.sort(g_mem.selected_vertices[:])
+		i := 0
+		for i < len(g_mem.edges) {
+			edge := g_mem.edges[i]
+			index1, found1 := slice.binary_search(g_mem.selected_vertices[:], edge[0])
+			index2, found2 := slice.binary_search(g_mem.selected_vertices[:], edge[1])
+			if found1 || found2 {
+				unordered_remove(&g_mem.edges, i)
+			} else {
+				// Set the new indices of the vertices
+				g_mem.edges[i][0] -= index1
+				g_mem.edges[i][1] -= index2
+				i += 1
+			}
+		}
+		for v, i in g_mem.selected_vertices {
+			end := len(g_mem.vertices)
+			if i < len(g_mem.selected_vertices) - 1 {
+				end = g_mem.selected_vertices[i + 1]
+			}
+			for j := v + 1; j < end; j += 1 {
+				g_mem.vertices[j - i - 1] = g_mem.vertices[j]
+			}
+		}
+		resize(&g_mem.vertices, len(g_mem.vertices) - len(g_mem.selected_vertices))
+
+		clear(&g_mem.selected_vertices)
+		clear(&g_mem.selected_edges)
+
+		vertex_under_mouse = -1
+		for i := len(g_mem.vertices) - 1; i > -1; i -= 1 {
+			if linalg.distance(g_mem.vertices[i], mouse_world_position) < 10 {
+				vertex_under_mouse = i
+				break
+			}
+		}
 	}
 
 	rl.BeginDrawing()
