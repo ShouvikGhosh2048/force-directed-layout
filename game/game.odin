@@ -19,6 +19,9 @@ import "core:math/rand"
 import "core:math/linalg"
 import "core:fmt"
 import "core:slice"
+import "core:os"
+import "core:strings"
+import "core:encoding/json"
 import rl "vendor:raylib"
 
 PIXEL_WINDOW_HEIGHT :: 180
@@ -33,6 +36,7 @@ Vertex :: struct {
 	position: [2]f32,
 	velocity: [2]f32,
 	acceleration: [2]f32,
+	text: cstring,
 }
 
 Game_Memory :: struct {
@@ -49,6 +53,11 @@ Game_Memory :: struct {
 	selected_vertices: [dynamic]int,
 	selected_edges: [dynamic]int,
 	apply_force: bool,
+}
+
+GraphFile :: struct {
+	vertices: [dynamic]string,
+	edges: [dynamic][2]int,
 }
 
 g_mem: ^Game_Memory
@@ -337,6 +346,7 @@ game_update :: proc() -> bool {
 		// We remove selected edges and vertices.
 		// We maintain the order of vertices.
 		// We don't maintain the order of edges.
+		slice.reverse_sort(g_mem.selected_edges[:])
 		for edge in g_mem.selected_edges {
 			unordered_remove(&g_mem.edges, edge)
 		}
@@ -356,6 +366,7 @@ game_update :: proc() -> bool {
 			}
 		}
 		for v, i in g_mem.selected_vertices {
+			delete(g_mem.vertices[v].text)
 			end := len(g_mem.vertices)
 			if i < len(g_mem.selected_vertices) - 1 {
 				end = g_mem.selected_vertices[i + 1]
@@ -376,6 +387,68 @@ game_update :: proc() -> bool {
 				break
 			}
 		}
+	}
+
+	if rl.IsFileDropped() && mouse_x_within_canvas {
+		files := rl.LoadDroppedFiles()
+		if files.count > 0 {
+			filepath := string(files.paths[0])
+			if json_data, ok := os.read_entire_file(filepath); ok {
+				defer delete(json_data)
+				graph_file: GraphFile
+				if json.unmarshal(json_data, &graph_file) == nil {
+					defer {
+						for vertex in graph_file.vertices {
+							delete(vertex)
+						}
+						delete(graph_file.vertices)
+						delete(graph_file.edges)
+					}
+					valid_edges := true
+					for edge in graph_file.edges {
+						if edge[0] < 0 || len(graph_file.vertices) <= edge[0] ||
+							edge[1] < 0 || len(graph_file.vertices) <= edge[1] {
+								valid_edges = false
+								break
+						}
+					}
+					if valid_edges {
+						g_mem.dragging = false
+						clear(&g_mem.selected_vertices)
+						clear(&g_mem.selected_edges)
+						for vertex in g_mem.vertices {
+							delete(vertex.text)
+						}
+						clear(&g_mem.vertices)
+						clear(&g_mem.edges)
+						// https://observablehq.com/@mbostock/phyllotaxis
+						spacing : f32 = 20.0
+						theta := math.PI * (3 - math.sqrt(f32(5)))
+						for vertex, i in graph_file.vertices {
+							r := spacing * math.sqrt(f32(i) + 0.5)
+							a := (f32(i) + 0.5) * theta
+							x := r * math.cos(a)
+							y := r * math.sin(a)
+							append(&g_mem.vertices, Vertex {
+								position = {x, y},
+								text = strings.clone_to_cstring(vertex)
+							})
+						}
+						for edge in graph_file.edges {
+							append(&g_mem.edges, edge)
+						}
+						vertex_under_mouse = -1
+						for i := len(g_mem.vertices) - 1; i > -1; i -= 1 {
+							if linalg.distance(g_mem.vertices[i].position, mouse_world_position) < 10 {
+								vertex_under_mouse = i
+								break
+							}
+						}
+					}
+				}
+			}
+		}
+		rl.UnloadDroppedFiles(files)
 	}
 
 	if g_mem.apply_force {
@@ -584,6 +657,17 @@ game_update :: proc() -> bool {
 		rl.DrawTextEx(g_mem.font, "Apply forces", {5, text_y}, 28, 0, rl.WHITE)
 	}
 
+	// TODO: Add a textbox to edit text
+	// rl.GuiSetFont(g_mem.font)
+	// rl.GuiSetStyle(.DEFAULT, 16, 28)
+	// rl.GuiTextBox({ w - SIDEBAR_WIDTH + 5, 5, SIDEBAR_WIDTH - 10, 35 }, cstring(&g_mem.text[0]), 1000, true)
+
+	text_y = 5
+	for vertex in g_mem.selected_vertices {
+		rl.DrawTextEx(g_mem.font, g_mem.vertices[vertex].text, {w - SIDEBAR_WIDTH + 5, text_y}, 28, 0, rl.WHITE)
+		text_y += 35
+	}
+
 	rl.EndDrawing()
 	return !rl.WindowShouldClose()
 }
@@ -611,6 +695,9 @@ game_init :: proc() {
 
 @(export)
 game_shutdown :: proc() {
+	for vertex in g_mem.vertices {
+		delete(vertex.text)
+	}
 	delete(g_mem.vertices) // TODO: Is this correct?
 	delete(g_mem.edges)
 	delete(g_mem.selected_vertices)
