@@ -39,6 +39,91 @@ Vertex :: struct {
 	text: cstring,
 }
 
+BarnesHutTreeNode :: struct {
+    position: [2]f32,
+    dimension: [2]f32,
+    number_of_vertices: int,
+	center_of_mass: [2]f32,
+	has_children: bool,
+    children: [4]int,
+}
+
+create_barnes_hut_tree :: proc(tree: ^[dynamic]BarnesHutTreeNode, box_position: [2]f32, box_dimension: [2]f32, positions: [][2]f32) -> int {
+	node := BarnesHutTreeNode {
+		position = box_position,
+		dimension = box_dimension,
+		number_of_vertices = len(positions),
+		children = { -1, -1, -1, -1 }, // Set -1 to detect possible errors.
+	}
+
+	if node.number_of_vertices > 0 {
+		for position in positions {
+			node.center_of_mass += position
+		}
+		node.center_of_mass /= f32(node.number_of_vertices)
+	}
+
+	if node.number_of_vertices > 1 && max(box_dimension.x, box_dimension.y) > 1e-6 {
+		node.has_children = true
+
+		curr := 0
+		for i in 0..<len(positions) {
+			if positions[i].x <= box_position.x + box_dimension.x / 2 &&
+				positions[i].y <= box_position.y + box_dimension.y / 2 {
+				positions[i], positions[curr] = positions[curr], positions[i]
+				curr += 1
+			}
+		}
+		size1 := curr
+		node.children[0] = create_barnes_hut_tree(tree, box_position, box_dimension / 2, positions[:size1])
+
+		for i in size1..<len(positions) {
+			if positions[i].x > box_position.x + box_dimension.x / 2 &&
+				positions[i].y <= box_position.y + box_dimension.y / 2 {
+				positions[i], positions[curr] = positions[curr], positions[i]
+				curr += 1
+			}
+		}
+		size2 := curr
+		node.children[1] = create_barnes_hut_tree(tree, box_position + { box_dimension.x / 2, 0 }, box_dimension / 2, positions[size1:size2])
+
+		for i in size2..<len(positions) {
+			if positions[i].x <= box_position.x + box_dimension.x / 2 &&
+				positions[i].y > box_position.y + box_dimension.y / 2 {
+				positions[i], positions[curr] = positions[curr], positions[i]
+				curr += 1
+			}
+		}
+		size3 := curr
+		node.children[2] = create_barnes_hut_tree(tree, box_position + { 0, box_dimension.y / 2 }, box_dimension / 2, positions[size2:size3])
+
+		node.children[3] = create_barnes_hut_tree(tree, box_position + box_dimension / 2, box_dimension / 2, positions[size3:])
+	}
+
+	append(tree, node)
+	return len(tree) - 1
+}
+
+inverse_distance_from_position :: proc(tree: []BarnesHutTreeNode, root: int, position: [2]f32) -> [2]f32 {
+	if tree[root].number_of_vertices == 0 {
+		return { 0, 0 }
+	}
+
+	distance_to_center := linalg.length(tree[root].center_of_mass - position)
+	region_size := max(tree[root].dimension.x, tree[root].dimension.y)
+	// Threshold = 0.5 - https://beltoforion.de/en/barnes-hut-galaxy-simulator/
+	// https://anaroxanapop.github.io/behalf
+	if !tree[root].has_children || region_size / distance_to_center < 0.5 {
+		return f32(tree[root].number_of_vertices) * linalg.normalize0(tree[root].center_of_mass - position) / max(1e-6, distance_to_center)
+	} else {
+		res: [2]f32
+		for child_index in tree[root].children {
+			res += inverse_distance_from_position(tree, child_index, position)
+		}
+		return res
+	}
+}
+
 Game_Memory :: struct {
 	camera_target: rl.Vector2,
 	camera_zoom: f32,
@@ -53,6 +138,8 @@ Game_Memory :: struct {
 	selected_vertices: [dynamic]int,
 	selected_edges: [dynamic]int,
 	apply_force: bool,
+	quadtree: [dynamic]BarnesHutTreeNode,
+	quadtree_positions: [dynamic][2]f32,
 }
 
 GraphFile :: struct {
@@ -454,30 +541,42 @@ game_update :: proc() -> bool {
 	if g_mem.apply_force {
 		dt := min(rl.GetFrameTime(), 1 / 30.0) * 20.0
 		for _ in 0..<10 {
+			// Construct quad tree
+			clear(&g_mem.quadtree)
+			clear(&g_mem.quadtree_positions)
+			min_x := max(f32)
+			max_x := min(f32)
+			min_y := max(f32)
+			max_y := min(f32)
+			for vertex, i in g_mem.vertices {
+				append(&g_mem.quadtree_positions, vertex.position)
+				min_x = min(vertex.position.x, min_x)
+				max_x = max(vertex.position.x, max_x)
+				min_y = min(vertex.position.y, min_y)
+				max_y = max(vertex.position.y, max_y)
+			}
+			root := create_barnes_hut_tree(&g_mem.quadtree, { min_x, min_y }, { max_x - min_x, max_y - min_y }, g_mem.quadtree_positions[:])
+
 			for i in 0..<len(g_mem.vertices) {
 				g_mem.vertices[i].acceleration = -0.05 * g_mem.vertices[i].velocity
 			}
 			for i in 0..<len(g_mem.vertices) {
-				for j in i+1..<len(g_mem.vertices) {
-					displacement := g_mem.vertices[j].position - g_mem.vertices[i].position
-					force := 100.0 * linalg.normalize0(displacement) / linalg.length(displacement)
-					g_mem.vertices[j].acceleration += force * dt / 10.0
-					g_mem.vertices[i].acceleration -= force * dt / 10.0
-				}
+				force := 0.1 * inverse_distance_from_position(g_mem.quadtree[:], root, g_mem.vertices[i].position)
+				g_mem.vertices[i].acceleration -= force
 			}
 			for edge in g_mem.edges {
 				i := edge[0]
 				j := edge[1]
 				displacement := g_mem.vertices[j].position - g_mem.vertices[i].position
-				force := (50 - linalg.length(displacement)) * linalg.normalize0(displacement)
-				g_mem.vertices[j].acceleration += force * dt / 10.0
-				g_mem.vertices[i].acceleration -= force * dt / 10.0
+				force := 0.001 * (50 - linalg.length(displacement)) * linalg.normalize0(displacement)
+				g_mem.vertices[j].acceleration += force
+				g_mem.vertices[i].acceleration -= force
 			}
 			for i in 0..<len(g_mem.vertices) {
 				_, found := slice.binary_search(g_mem.selected_vertices[:], i)
 				if !found {
-					g_mem.vertices[i].velocity += g_mem.vertices[i].acceleration * dt / 10.0
-					g_mem.vertices[i].position += g_mem.vertices[i].velocity * dt / 10.0
+					g_mem.vertices[i].velocity += g_mem.vertices[i].acceleration * dt
+					g_mem.vertices[i].position += g_mem.vertices[i].velocity * dt
 				}
 			}
 		}
@@ -590,6 +689,16 @@ game_update :: proc() -> bool {
 		assert(g_mem.drag_vertex_index > -1)
 		rl.DrawPoly(g_mem.vertices[g_mem.drag_vertex_index].position, 6, 10, 0, rl.ORANGE)
 	}
+
+	if g_mem.apply_force {
+		for node in g_mem.quadtree {
+			rl.DrawLineV(node.position, node.position + { node.dimension.x, 0 }, rl.WHITE)
+			rl.DrawLineV(node.position, node.position + { 0, node.dimension.y }, rl.WHITE)
+			rl.DrawLineV(node.position + { 0, node.dimension.y }, node.position + node.dimension, rl.WHITE)
+			rl.DrawLineV(node.position + { node.dimension.x, 0 }, node.position + node.dimension, rl.WHITE)
+		}
+	}
+
 	rl.EndMode2D()
 
 	// Note: main_hot_reload.odin clears the temp allocator at end of frame.
@@ -702,6 +811,8 @@ game_shutdown :: proc() {
 	delete(g_mem.edges)
 	delete(g_mem.selected_vertices)
 	delete(g_mem.selected_edges)
+	delete(g_mem.quadtree)
+	delete(g_mem.quadtree_positions)
 	free(g_mem)
 }
 
